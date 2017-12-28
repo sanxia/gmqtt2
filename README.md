@@ -5,7 +5,7 @@ Example gmqtt client
 
 import (
 
-    "github.com/sanxia/gmqtt"
+    "github.com/sanxia/gmqtt2"
 
 )
 
@@ -13,7 +13,7 @@ import (
 
     const TOPIC1 = "sanxia/classroom2"
 
-    client := gmqtt.NewClient("127.0.0.1", 1883)
+    client := gmqtt2.NewClient("127.0.0.1", 1883)
 
     client.SetCliendId("gmqtt-sanxia")
 
@@ -31,7 +31,7 @@ import (
     client.Publish(TOPIC2, "MQTT message 2", 0, false)
 
 
-    messageHandler := func(client *gmqtt.MqttClient, message *gmqtt.Message) {
+    messageHandler := func(client *gmqtt2.MqttClient, message *gmqtt2.Message) {
 
         statusInfo := client.StatusInfo()
 
