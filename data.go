@@ -27,23 +27,24 @@ const (
 
 type (
 	MqttClient struct {
-		username        string
-		password        string
-		host            string
-		port            int
-		clientId        string
-		topics          map[string]proto.QosLevel
-		messageHandler  func(*MqttClient, *Message)
-		conn            net.Conn
-		client          *mqtt.ClientConn
-		reconnInterval  int
-		reconnCount     int
-		isReconn        bool
-		isConnected     bool
-		isDisconnect    bool
-		connErrorChan   chan bool
-		connSuccessChan chan bool
-		Status          *ClientStatus
+		username         string
+		password         string
+		host             string
+		port             int
+		clientId         string
+		topics           map[string]proto.QosLevel
+		messageHandler   func(*MqttClient, *Message)
+		conn             net.Conn
+		client           *mqtt.ClientConn
+		reconnInterval   int
+		reconnCount      int
+		isReconn         bool
+		isConnected      bool
+		isDisconnect     bool
+		messageErrorChan chan bool
+		connErrorChan    chan bool
+		connSuccessChan  chan bool
+		Status           *ClientStatus
 	}
 
 	//消息

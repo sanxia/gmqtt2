@@ -14,7 +14,7 @@ import (
 )
 
 /* ================================================================================
- * Oauth
+ * MQTT Client for golang
  * qq group: 582452342
  * email   : 2091938785@qq.com
  * author  : 美丽的地球啊
@@ -39,9 +39,10 @@ func NewClient(host string, port int) *MqttClient {
 			SendCount:   0,
 			ReceivCount: 0,
 		},
-		topics:          make(map[string]proto.QosLevel, 0),
-		connErrorChan:   make(chan bool),
-		connSuccessChan: make(chan bool),
+		topics:           make(map[string]proto.QosLevel, 0),
+		messageErrorChan: make(chan bool),
+		connErrorChan:    make(chan bool),
+		connSuccessChan:  make(chan bool),
 	}
 
 	//监视连接状态
@@ -61,7 +62,6 @@ func (s *MqttClient) Connect() error {
 	var err error
 	var count int = 1
 
-	//连接服务器
 	for {
 		fmt.Fprintf(os.Stderr, "第 %d 次连接尝试, err: %v\n", count, err)
 
@@ -71,12 +71,15 @@ func (s *MqttClient) Connect() error {
 				break
 			}
 
+			if count > 1 {
+				time.Sleep(time.Duration(int64(s.reconnInterval)) * time.Second)
+			}
+
 			s.Status.ReconnCount++
 			count++
-
-			time.Sleep(time.Duration(int64(s.reconnInterval)) * time.Second)
 		}
 
+		//连接服务器
 		err = s.dialTcp()
 		if err == nil {
 			break
@@ -89,7 +92,6 @@ func (s *MqttClient) Connect() error {
 		//已成功连接
 		s.isConnected = true
 		s.connSuccessChan <- true
-
 		s.connErrorChan <- false
 	}
 
@@ -100,16 +102,15 @@ func (s *MqttClient) Connect() error {
  * 监视连接状态，自动重连
  * ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
 func (s *MqttClient) monitorConnectStatus() {
-MONITOR_LOOP:
 	for {
+		if s.isDisconnect {
+			//中止链接监视器
+			break
+		}
+
 		select {
 		case isConnectionError := <-s.connErrorChan:
 			fmt.Fprintf(os.Stderr, "%s, 连接状态 isConnectionError: %v\r\n", "监视连接状态", isConnectionError)
-
-			if s.isDisconnect {
-				//中止链接监视器
-				break MONITOR_LOOP
-			}
 
 			if isConnectionError {
 				s.Status.ErrorCount++
@@ -148,10 +149,11 @@ func (s *MqttClient) message() {
 	fmt.Fprint(os.Stderr, "派发消息 start\r\n")
 
 MESSAGE_LOOP:
-
 	for {
 		fmt.Fprint(os.Stderr, "message---\r\n")
 		select {
+		case _ = <-s.messageErrorChan:
+			break MESSAGE_LOOP
 		case data := <-s.client.Incoming:
 			if data == nil {
 				if !s.isDisconnect {
@@ -159,6 +161,7 @@ MESSAGE_LOOP:
 
 					s.isConnected = false
 
+					s.messageErrorChan <- true
 					s.connErrorChan <- true
 
 					//结束消息循环
@@ -186,7 +189,7 @@ MESSAGE_LOOP:
 					s.Status.ReceivCount++
 				}
 			}
-		case <-time.After(1 * time.Second):
+		case <-time.After(5 * time.Second):
 			time.Sleep(1000 * time.Millisecond)
 		}
 	}
