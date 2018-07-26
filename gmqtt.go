@@ -39,16 +39,16 @@ func NewClient(host string, port int) *MqttClient {
 			SendCount:   0,
 			ReceivCount: 0,
 		},
-		topics:      make(map[string]proto.QosLevel, 0),
-		connError:   make(chan bool),
-		connSuccess: make(chan bool),
+		topics:          make(map[string]proto.QosLevel, 0),
+		connErrorChan:   make(chan bool),
+		connSuccessChan: make(chan bool),
 	}
 
 	//监视连接状态
-	client.monitorConnectStatus()
+	go client.monitorConnectStatus()
 
 	//派发消息
-	client.dispatchMessage()
+	go client.dispatchMessage()
 
 	return client
 }
@@ -63,10 +63,7 @@ func (s *MqttClient) Connect() error {
 
 	//连接服务器
 	for {
-		err := s.dialTcp()
-		if err == nil {
-			break
-		}
+		fmt.Fprintf(os.Stderr, "第 %d 次连接尝试, err: %v\n", count, err)
 
 		if s.isReconn {
 			//超过重连最大次数则返回
@@ -74,21 +71,127 @@ func (s *MqttClient) Connect() error {
 				break
 			}
 
-			fmt.Fprintf(os.Stderr, "第 %d 次连接尝试, err: %v\n", count, err)
-			time.Sleep(time.Duration(int64(s.reconnInterval)) * time.Second)
-
 			s.Status.ReconnCount++
 			count++
+
+			time.Sleep(time.Duration(int64(s.reconnInterval)) * time.Second)
+		}
+
+		err = s.dialTcp()
+		if err == nil {
+			break
 		}
 	}
-	fmt.Fprint(os.Stderr, "连接服务器成功\n")
 
-	s.isConnected = true
+	if err == nil {
+		fmt.Fprint(os.Stderr, "连接服务器成功\n")
 
-	//已成功连接
-	s.connSuccess <- true
+		//已成功连接
+		s.isConnected = true
+		s.connSuccessChan <- true
+
+		s.connErrorChan <- false
+	}
 
 	return err
+}
+
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ * 监视连接状态，自动重连
+ * ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+func (s *MqttClient) monitorConnectStatus() {
+MONITOR_LOOP:
+	for {
+		select {
+		case isConnectionError := <-s.connErrorChan:
+			fmt.Fprintf(os.Stderr, "%s, 连接状态 isConnectionError: %v\r\n", "监视连接状态", isConnectionError)
+
+			if s.isDisconnect {
+				//中止链接监视器
+				break MONITOR_LOOP
+			}
+
+			if isConnectionError {
+				s.Status.ErrorCount++
+				fmt.Fprintf(os.Stderr, "尝试重新连接服务器\r\n")
+
+				if !s.isConnected {
+					s.Connect()
+				}
+			}
+		}
+	}
+}
+
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ * 派发消息
+ * ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+func (s *MqttClient) dispatchMessage() {
+	fmt.Fprint(os.Stderr, "dispatchMessage\r\n")
+
+	for {
+		fmt.Fprint(os.Stderr, "dispatchMessage---\r\n")
+		select {
+		case isConnSuccess := <-s.connSuccessChan:
+			fmt.Fprintf(os.Stderr, "dispatchMessage isConnSuccess: %v\r\n", isConnSuccess)
+			if isConnSuccess {
+				go s.message()
+			}
+		}
+	}
+}
+
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ * 消息处理
+ * ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+func (s *MqttClient) message() {
+	fmt.Fprint(os.Stderr, "派发消息 start\r\n")
+
+MESSAGE_LOOP:
+
+	for {
+		fmt.Fprint(os.Stderr, "message---\r\n")
+		select {
+		case data := <-s.client.Incoming:
+			if data == nil {
+				if !s.isDisconnect {
+					fmt.Fprintf(os.Stderr, "派发消息失败\r\n")
+
+					s.isConnected = false
+
+					s.connErrorChan <- true
+
+					//结束消息循环
+					break MESSAGE_LOOP
+				}
+			} else {
+				if s.messageHandler != nil {
+					payload := new(bytes.Buffer)
+					data.Payload.WritePayload(payload)
+
+					message := &Message{
+						Header: MessageHeader{
+							DupFlag:  data.DupFlag,
+							Retain:   data.Retain,
+							QosLevel: QosLevel(data.QosLevel),
+						},
+					}
+
+					message.MessageId = data.MessageId
+					message.TopicName = data.TopicName
+					message.Payload = payload.Bytes()
+
+					s.messageHandler(s, message)
+
+					s.Status.ReceivCount++
+				}
+			}
+		case <-time.After(1 * time.Second):
+			time.Sleep(1000 * time.Millisecond)
+		}
+	}
+
+	fmt.Fprint(os.Stderr, "派发消息 end\r\n")
 }
 
 /* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -131,116 +234,27 @@ func (s *MqttClient) dialTcp() error {
 }
 
 /* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- * 监视连接状态，自动重连
- * ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
-func (s *MqttClient) monitorConnectStatus() {
-	go func() {
-	FOREVER:
-		for {
-			select {
-			case connError := <-s.connError:
-				if s.isDisconnect {
-					break FOREVER
-				} else {
-					if !s.isConnected {
-						fmt.Fprintf(os.Stderr, "%s, 连接状态是否异常:%v\r\n", "监视连接状态", connError)
-						if connError {
-							s.Status.ErrorCount++
-							fmt.Fprintf(os.Stderr, "尝试重新连接服务器\r\n")
-
-							s.Connect()
-						}
-					}
-				}
-			}
-
-		}
-	}()
-}
-
-/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- * 派发消息
- * ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
-func (s *MqttClient) dispatchMessage() {
-	go func() {
-		for {
-			select {
-			case connSuccess := <-s.connSuccess:
-				if connSuccess {
-					s.message()
-				}
-			}
-		}
-	}()
-}
-
-/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- * 消息处理
- * ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
-func (s *MqttClient) message() {
-	fmt.Fprint(os.Stderr, "派发消息\r\n")
-
-FOREVER:
-	for {
-		select {
-		case m := <-s.client.Incoming:
-			if m == nil {
-				if !s.isDisconnect {
-					fmt.Fprintf(os.Stderr, "派发消息失败，准备重连\r\n")
-					s.isConnected = false
-					s.connError <- true
-				}
-
-				break FOREVER
-			}
-
-			if s.messageHandler != nil {
-				message := &Message{
-					Header: MessageHeader{
-						DupFlag:  m.DupFlag,
-						Retain:   m.Retain,
-						QosLevel: QosLevel(m.QosLevel),
-					},
-				}
-
-				data := new(bytes.Buffer)
-				m.Payload.WritePayload(data)
-				payload := data.Bytes()
-
-				message.MessageId = m.MessageId
-				message.TopicName = m.TopicName
-				message.Payload = payload
-
-				s.messageHandler(s, message)
-
-				s.Status.ReceivCount++
-			}
-		case <-time.After(1 * time.Second):
-			fmt.Fprint(os.Stderr, "Idle \r\n")
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-}
-
-/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
  * 发布消息
  * ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
 func (s *MqttClient) Publish(topic, payload string, qosLevel QosLevel, isRetain bool) {
 	defer func() {
 		if err := recover(); err != nil {
-			fmt.Fprintf(os.Stderr, "发布消息网络异常，准备重连: %v\r\n", err)
+			fmt.Fprintf(os.Stderr, "发布消息异常 %v\r\n", err)
+
 			s.isConnected = false
-			s.connError <- true
+			s.connErrorChan <- true
 		}
 	}()
 
-	s.client.Publish(&proto.Publish{
-		Header:    proto.Header{Retain: isRetain, QosLevel: proto.QosLevel(qosLevel)},
-		TopicName: topic,
-		Payload:   proto.BytesPayload([]byte(payload)),
-	})
+	if s.isConnected {
+		s.client.Publish(&proto.Publish{
+			Header:    proto.Header{Retain: isRetain, QosLevel: proto.QosLevel(qosLevel)},
+			TopicName: topic,
+			Payload:   proto.BytesPayload([]byte(payload)),
+		})
 
-	s.Status.SendCount++
+		s.Status.SendCount++
+	}
 }
 
 /* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -261,8 +275,8 @@ func (s *MqttClient) Disconnect() {
 
 	s.client.Disconnect()
 
-	close(s.connError)
-	close(s.connSuccess)
+	close(s.connErrorChan)
+	close(s.connSuccessChan)
 
 	if s.conn != nil {
 		s.conn.Close()
